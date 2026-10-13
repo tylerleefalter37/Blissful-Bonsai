@@ -503,9 +503,9 @@
 
   const $ = id => document.getElementById(id);
 
-  /* ================= 64x64 ZEN BONSAI PIXEL ART GENERATOR ================= */
+/* ================= 512x512 MASTER ZEN BONSAI BIO-ENGINE ================= */
   const offscreenCanvas = document.createElement('canvas');
-  offscreenCanvas.width = 64; offscreenCanvas.height = 64;
+  offscreenCanvas.width = 512; offscreenCanvas.height = 512;
   const offscreenCtx = offscreenCanvas.getContext('2d');
 
   function Mulberry32(a) {
@@ -517,140 +517,359 @@
     }
   }
 
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function lerpCol(c1, c2, t) {
+    return [
+      Math.round(lerp(c1[0], c2[0], t)),
+      Math.round(lerp(c1[1], c2[1], t)),
+      Math.round(lerp(c1[2], c2[2], t))
+    ];
+  }
+  function rgb(c) { return `rgb(${c[0]},${c[1]},${c[2]})`; }
+  function rgba(c, a) { return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
+
+  function drawRoundedRect(c, x, y, w, h, r) {
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.lineTo(x + w - r, y);
+    c.quadraticCurveTo(x + w, y, x + w, y + r);
+    c.lineTo(x + w, y + h - r);
+    c.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    c.lineTo(x + r, y + h);
+    c.quadraticCurveTo(x, y + h, x, y + h - r);
+    c.lineTo(x, y + r);
+    c.quadraticCurveTo(x, y, x + r, y);
+    c.closePath();
+  }
+
   function generateBonsaiImage(seedInt, role, tierIdx, sp) {
-    offscreenCtx.clearRect(0, 0, 64, 64);
+    const ctx = offscreenCtx;
+    ctx.clearRect(0, 0, 512, 512);
     const rng = Mulberry32(seedInt);
-    const grid = Array(64).fill(0).map(() => Array(64).fill(null));
 
-    // Determine Foliage Palette based on Species
-    let foliage = { base: ['#1e3b20', '#18301a'], mid: ['#2d5a2f', '#3c753e'], high: ['#529955', '#6ebd70'] };
-    if(sp.includes("Maple") || sp.includes("Ginkgo")) foliage = { base: ['#5c1a06', '#4a1505'], mid: ['#a8320a', '#c94612'], high: ['#e86a17', '#f59e0b'] }; // Autumn
-    else if(sp.includes("Azalea") || sp.includes("Bougainvillea")) foliage = { base: ['#1e3b20', '#18301a'], mid: ['#2d5a2f', '#d946ef'], high: ['#529955', '#f472b6'] }; // Pink flowers
-    else if(sp.includes("Pine") || sp.includes("Juniper") || sp.includes("Cedar")) foliage = { base: ['#0f1f12', '#0a140c'], mid: ['#1b3820', '#254d2c'], high: ['#356b3e', '#458750'] }; // Dark green
-    else if(sp.includes("Wisteria")) foliage = { base: ['#2e1065', '#3b0764'], mid: ['#6b21a8', '#86198f'], high: ['#c084fc', '#e879f9'] }; // Purples
+    // --- 1. BOTANICAL PALETTE DEFINITIONS ---
+    let foliage = {
+      base: [18, 44, 22], mid: [34, 76, 38], high: [64, 128, 68], bloom: null
+    };
 
-    // Draw Pot
-    let potColor = ['#8c4226', '#3b5966', '#2c3328', '#635848'][Math.floor(rng()*4)];
-    let px = 32, py = 56, pw = 12, ph = 3;
-    if(role === 'KENGAI') { pw = 8; ph = 10; py = 48; }
-    if(role === 'YOSE_UE') { pw = 22; ph = 2; py = 58; }
-    
-    for(let y=py-ph; y<=py+ph; y++) {
-        for(let x=px-pw; x<=px+pw; x++) {
-            if(x>=0 && x<64 && y>=0 && y<64) {
-                let isLip = (y === py-ph);
-                let c = isLip ? '#1a1a1a' : potColor;
-                if(!isLip && (x > px+pw*0.5 || y > py+ph*0.5)) c = '#111'; // Shadow
-                grid[y][x] = {c: c};
-            }
-        }
+    if (sp.includes("Maple") || sp.includes("Ginkgo")) {
+      // Momiji Autumn Scarlet & Amber Gold
+      foliage = { base: [68, 16, 6], mid: [160, 42, 12], high: [228, 96, 18], bloom: [248, 168, 24] };
+    } else if (sp.includes("Azalea") || sp.includes("Bougainvillea")) {
+      // Satsuki Flowering Petals
+      foliage = { base: [22, 48, 26], mid: [42, 88, 48], high: [210, 52, 142], bloom: [248, 118, 188] };
+    } else if (sp.includes("Pine") || sp.includes("Juniper") || sp.includes("Cedar")) {
+      // Deep Evergreen Needles
+      foliage = { base: [8, 26, 12], mid: [20, 50, 26], high: [42, 94, 52], bloom: null };
+    } else if (sp.includes("Wisteria")) {
+      // Cascading Purple Racemes
+      foliage = { base: [34, 10, 64], mid: [74, 22, 134], high: [164, 102, 238], bloom: [224, 162, 248] };
+    } else if (sp.includes("Oak") || sp.includes("Elm") || sp.includes("Hornbeam")) {
+      // Deciduous Broadleaf Summer
+      foliage = { base: [24, 52, 24], mid: [52, 104, 46], high: [92, 158, 74], bloom: null };
     }
 
-    // Trunk generation function
-    function drawTrunk(rootX, rootY, style) {
-        let pts = [];
-        let len = 40;
-        if(style === 'KENGAI') len = 50;
-        if(style === 'BUNJINGI') len = 48;
+    // --- 2. ATMOSPHERIC SHADOW & BACKGROUND ---
+    const bgGrad = ctx.createRadialGradient(256, 210, 40, 256, 256, 310);
+    bgGrad.addColorStop(0, "#0d100d");
+    bgGrad.addColorStop(0.7, "#050705");
+    bgGrad.addColorStop(1, "#020302");
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, 512, 512);
 
-        let tx = rootX, ty = rootY;
-        let moyogiOffset = rng()*Math.PI;
+    // Subtle Shoji Paper Light Wash
+    ctx.fillStyle = "rgba(74, 222, 128, 0.015)";
+    ctx.beginPath();
+    ctx.moveTo(140, 0); ctx.lineTo(372, 0); ctx.lineTo(512, 512); ctx.lineTo(0, 512);
+    ctx.closePath();
+    ctx.fill();
 
-        for(let i=0; i<=len; i++) {
-            let prog = i/len;
-            let thick = Math.max(0.5, 4 * (1 - prog));
-            if(style === 'BUNJINGI') thick = Math.max(0.5, 1.8 * (1 - prog));
-            if(style === 'YOSE_UE') thick = Math.max(0.5, 2.5 * (1 - prog));
-            
-            if(style === 'MOYOGI') {
-                tx = rootX + Math.sin(prog * Math.PI * 3 + moyogiOffset) * 9 * (1-prog);
-                ty -= 0.85;
-            } else if(style === 'KENGAI') {
-                if(prog < 0.2) { ty -= 1.0; tx -= 0.5; }
-                else { ty += 1.3; tx -= 1.1; } // cascade down/left
-            } else if(style === 'SHAKAN') {
-                tx += 1.0; ty -= 0.9;
-            } else { // CHOKKAN, YOSE_UE, BUNJINGI
-                tx += (rng()-0.5)*0.8;
-                ty -= (style === 'BUNJINGI' ? 0.9 : 1.0);
-            }
-            pts.push({x: tx, y: ty, r: thick});
-        }
-        
-        // Draw trunk pixels
-        pts.forEach(p => {
-            let r = p.r;
-            for(let y=Math.floor(p.y-r); y<=Math.ceil(p.y+r); y++) {
-                for(let x=Math.floor(p.x-r); x<=Math.ceil(p.x+r); x++) {
-                    let dx = x-p.x, dy = y-p.y;
-                    if(dx*dx + dy*dy <= r*r) {
-                        if(x>=0 && x<64 && y>=0 && y<64) {
-                            let col = '#4a3b2c'; 
-                            if(dx > r*0.3) col = '#2a1f16'; // shadow right side
-                            if(tierIdx >= 6 && rng() < 0.20 && dx < 0) col = '#d1ceca'; // Jin/Shari deadwood
-                            grid[y][x] = {c: col, z: 1};
-                        }
-                    }
-                }
-            }
-        });
-        
-        // Draw foliage pads along the spine
-        let padCount = style==='BUNJINGI' ? (1+Math.floor(rng()*2)) : (style==='KENGAI' ? 8 : (style==='YOSE_UE' ? 3 : 6));
-        for(let i=0; i<padCount; i++) {
-            let targetProg = style==='BUNJINGI' ? (0.9 + rng()*0.1) : (0.2 + rng()*0.8);
-            if(style==='YOSE_UE') targetProg = 0.5 + rng()*0.5;
-            
-            let centerPt = pts[Math.floor(targetProg * len)];
-            if(!centerPt) continue;
-            
-            let pw = 6 + rng()*4;
-            let ph = 3 + rng()*2;
-            if(style === 'YOSE_UE') { pw = 4+rng()*3; ph = 2+rng()*2; }
-            if(style === 'BUNJINGI') { pw = 5+rng()*3; ph = 2+rng()*1; }
-            
-            for(let y=Math.floor(centerPt.y-ph); y<=Math.ceil(centerPt.y+ph); y++) {
-                for(let x=Math.floor(centerPt.x-pw); x<=Math.ceil(centerPt.x+pw); x++) {
-                    let dx = x-centerPt.x, dy = y-centerPt.y;
-                    if((dx*dx)/(pw*pw) + (dy*dy)/(ph*ph) <= 1) {
-                        if(x>=0 && x<64 && y>=0 && y<64) {
-                            let light = (dx/pw + dy/ph); 
-                            let c = foliage.mid[Math.floor(rng()*foliage.mid.length)];
-                            if(light < -0.2) c = foliage.high[Math.floor(rng()*foliage.high.length)];
-                            else if(light > 0.4) c = foliage.base[Math.floor(rng()*foliage.base.length)];
-                            
-                            if(rng() < 0.1) c = foliage.mid[0]; // noise
-                            grid[y][x] = {c: c, z: 2};
-                        }
-                    }
-                }
-            }
-        }
+    // --- 3. YAKISUGI DISPLAY STAND ---
+    const standY = 478;
+    const standH = 22;
+    const standW = role === 'KENGAI' ? 220 : 340;
+    const standX = 256 - standW * 0.5;
+
+    // Dark Rosewood Base
+    ctx.fillStyle = "#0a0807";
+    ctx.fillRect(standX - 10, standY, standW + 20, standH);
+
+    // Beveled Top Highlight & Carved Line
+    ctx.fillStyle = "rgba(48, 34, 26, 0.85)";
+    ctx.fillRect(standX - 8, standY + 2, standW + 16, 5);
+    ctx.strokeStyle = "rgba(18, 14, 12, 0.95)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(standX - 10, standY, standW + 20, standH);
+
+    // Carved Feet
+    ctx.fillStyle = "#060504";
+    ctx.fillRect(standX - 2, standY + standH, 20, 8);
+    ctx.fillRect(standX + standW - 18, standY + standH, 20, 8);
+
+    // --- 4. TOKONAME POTTERY & SLABS ---
+    let potY = standY - 2;
+    let potH = 28;
+    let potW = 108;
+    let potColor = [42, 52, 62]; // Glazed Celadon / Slate
+
+    if (role === 'KENGAI') {
+      potW = 48; potH = 112; potY = standY - 106; // Tall Cascade Vessel
+      potColor = [72, 48, 38]; // Unglazed Red Clay
+    } else if (role === 'YOSE_UE') {
+      potW = 172; potH = 12; potY = standY - 4; // Flat Granite Tray
+      potColor = [48, 52, 48];
     }
 
-    // Execute drawing based on style
-    if(role === 'YOSE_UE') {
-        let trunks = 3 + Math.floor(rng()*3); // 3 to 5 trunks
-        for(let t=0; t<trunks; t++) {
-            drawTrunk(px - pw*0.8 + (pw*1.6)*(t/(trunks-1)), py-ph, role);
+    const potX = 256 - potW;
+
+    // Ambient Grounding Shadow
+    const shGrad = ctx.createRadialGradient(256, potY + potH, 8, 256, potY + potH + 4, potW * 1.35);
+    shGrad.addColorStop(0, "rgba(0, 0, 0, 0.95)");
+    shGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
+    ctx.fillStyle = shGrad;
+    ctx.fillRect(potX - 30, potY + potH - 4, potW * 2 + 60, 14);
+
+    // Ceramic Vessel Body
+    ctx.fillStyle = rgb(potColor);
+    drawRoundedRect(ctx, potX, potY, potW * 2, potH, 3);
+    ctx.fill();
+
+    // Glaze Lighting & Shading
+    const potHighlight = ctx.createLinearGradient(potX, potY, potX + potW * 2, potY);
+    potHighlight.addColorStop(0, "rgba(0, 0, 0, 0.55)");
+    potHighlight.addColorStop(0.18, "rgba(255, 255, 255, 0.14)");
+    potHighlight.addColorStop(0.5, "rgba(255, 255, 255, 0.0)");
+    potHighlight.addColorStop(0.85, "rgba(0, 0, 0, 0.35)");
+    potHighlight.addColorStop(1, "rgba(0, 0, 0, 0.75)");
+    ctx.fillStyle = potHighlight;
+    drawRoundedRect(ctx, potX, potY, potW * 2, potH, 3);
+    ctx.fill();
+
+    // Raised Outer Lip
+    ctx.fillStyle = rgb(lerpCol(potColor, [10, 10, 10], 0.3));
+    ctx.fillRect(potX - 3, potY, potW * 2 + 6, 6);
+    ctx.fillStyle = "rgba(255, 255, 255, 0.18)";
+    ctx.fillRect(potX - 3, potY + 1, potW * 2 + 6, 1.5);
+
+    // --- 5. PEAT SOIL, NEBARI ROOTS & MOSS ---
+    const soilY = potY + 1;
+    const soilW = potW - 5;
+    ctx.fillStyle = "#22160f"; // Rich Akadama
+    ctx.beginPath();
+    ctx.ellipse(256, soilY, soilW, 14, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Velvet Moss Cushions
+    const mossColor = [38, 80, 30];
+    for (let m = 0; m < 55; m++) {
+      const mx = 256 + (rng() - 0.5) * soilW * 1.65;
+      const my = soilY + (rng() - 0.5) * 13;
+      const mr = 4 + rng() * 7;
+      ctx.fillStyle = rgba(lerpCol(mossColor, [88, 155, 48], rng() * 0.45), 0.88);
+      ctx.beginPath();
+      ctx.arc(mx, my, mr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Suiseki Miniature Accent Stone
+    ctx.fillStyle = "#383431";
+    ctx.beginPath();
+    ctx.ellipse(256 - soilW * 0.45, soilY + 3, 14, 6, 0.15, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#242220";
+    ctx.beginPath();
+    ctx.ellipse(256 - soilW * 0.45, soilY + 3, 10, 4, 0.12, 0, Math.PI * 2);
+    ctx.fill();
+
+    // --- 6. GNARLED BRANCHING ENGINE ---
+    function drawSinuousBranch(startX, startY, angle, maxSteps, baseWidth, isTrunk = false) {
+      const points = [];
+      let cx = startX;
+      let cy = startY;
+      let ca = angle;
+
+      const variance = (role === 'MOYOGI') ? 0.36 : 0.18;
+
+      for (let s = 0; s <= maxSteps; s++) {
+        const t = s / maxSteps;
+        const width = baseWidth * Math.pow(1 - t * 0.75, 1.15);
+
+        let sway = Math.sin(t * Math.PI * 3.5 + seedInt) * variance;
+        if (role === 'CHOKKAN' && isTrunk) sway = (rng() - 0.5) * 0.04;
+        if (role === 'SHAKAN' && isTrunk) ca = -Math.PI * 0.42 + Math.sin(t * Math.PI) * 0.08;
+        if (role === 'KENGAI' && isTrunk) {
+          if (t < 0.15) {
+            ca = -Math.PI * 0.46;
+          } else if (t < 0.45) {
+            ca = lerp(-Math.PI * 0.46, Math.PI * 0.48, (t - 0.15) / 0.3);
+            cx -= 0.65;
+          } else {
+            ca = Math.PI * 0.42;
+            cx -= 1.15;
+          }
         }
+        if (role === 'BUNJINGI' && isTrunk) {
+          sway = Math.sin(t * Math.PI * 6.5 + seedInt) * 0.42;
+        }
+
+        ca += sway;
+
+        const stepLen = isTrunk ? 7.6 : 4.6;
+        cx += Math.cos(ca) * stepLen;
+        cy += Math.sin(ca) * stepLen;
+
+        points.push({ x: cx, y: cy, r: width, step: s });
+      }
+
+      // Draw Wood Cross-Sections with 3D Core Bark Shading
+      for (let i = 0; i < points.length; i++) {
+        const p = points[i];
+        const r = Math.max(0.6, p.r);
+
+        ctx.fillStyle = "#2c1c15";
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fill();
+
+        if (r > 1.8) {
+          // Left-Side Highlight Ridge
+          ctx.fillStyle = "rgba(108, 78, 54, 0.45)";
+          ctx.beginPath();
+          ctx.arc(p.x - r * 0.25, p.y - r * 0.15, r * 0.65, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Right-Side Deep Crevice Shadow
+          ctx.fillStyle = "rgba(20, 10, 6, 0.65)";
+          ctx.beginPath();
+          ctx.arc(p.x + r * 0.35, p.y + r * 0.25, r * 0.5, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Ancient Bleached Deadwood (Jin / Shari)
+          if (tierIdx >= 5 && isTrunk && i > points.length * 0.22 && i < points.length * 0.62 && (i % 3 === 0)) {
+            ctx.fillStyle = "#dfd9ce";
+            ctx.fillRect(p.x - r * 0.6, p.y, r * 0.32, r * 1.5);
+          }
+        }
+      }
+
+      return points;
+    }
+
+    // --- 7. ORGANIC FOLIAGE PAD SHADER ---
+    function drawOrganicFoliagePad(cx, cy, pw, ph) {
+      const steps = 300;
+      ctx.save();
+
+      for (let f = 0; f < steps; f++) {
+        const u = rng() - 0.5;
+        const v = rng() - 0.5;
+        const d = Math.hypot(u, v);
+
+        if (d <= 0.5) {
+          const fx = cx + u * pw * 2.1;
+          const fy = cy + v * ph * 2.1;
+          const fr = 2.4 + rng() * 3.6;
+
+          let rgbColor = [...foliage.mid];
+          const layerProg = rng();
+
+          if (layerProg < 0.3) rgbColor = [...foliage.base];
+          else if (layerProg > 0.72) rgbColor = [...foliage.high];
+
+          if (foliage.bloom && rng() < 0.16) {
+            rgbColor = [...foliage.bloom];
+          }
+
+          // Tier VII+ Golden Zenith Pollen / Imperial Radiance
+          if (tierIdx >= 6 && rng() < 0.05) {
+            rgbColor = [248, 218, 110];
+          }
+
+          ctx.fillStyle = rgba(rgbColor, 0.74);
+          ctx.beginPath();
+          ctx.ellipse(fx, fy, fr, fr * 0.65, -0.15, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+    }
+
+    // --- 8. COMPOSING TREE BY STYLE ---
+    const trunkRootY = soilY - 2;
+    const trunkRootX = 256;
+
+    if (role === 'YOSE_UE') {
+      // Yose-Ue Forest Grove (5 Distinct Tapered Trunks)
+      const forestTrunks = [
+        { offset: -72, depth: 14, h: 40, scale: 5.6 },
+        { offset: -26, depth: -10, h: 48, scale: 7.0 },
+        { offset: 14, depth: 8, h: 56, scale: 9.2 }, // Dominant Master Tree
+        { offset: 50, depth: -12, h: 44, scale: 6.4 },
+        { offset: 80, depth: 10, h: 36, scale: 5.0 }
+      ];
+
+      forestTrunks.forEach(ft => {
+        const trunkPts = drawSinuousBranch(
+          trunkRootX + ft.offset,
+          trunkRootY + ft.depth,
+          -Math.PI * 0.51,
+          ft.h,
+          ft.scale,
+          true
+        );
+
+        for (let j = trunkPts.length - 12; j < trunkPts.length; j += 4) {
+          const pt = trunkPts[j];
+          drawOrganicFoliagePad(pt.x, pt.y - 10, 32, 14);
+        }
+      });
+
     } else {
-        drawTrunk(px, py-ph, role);
-    }
+      // Solitary Specimen Bonsai
+      let trunkLen = 42;
+      let initAngle = -Math.PI * 0.48;
+      let startWidth = 15;
 
-    // Paint to offscreen canvas
-    for (let y = 0; y < 64; y++) {
-      for (let x = 0; x < 64; x++) {
-        if (grid[y][x]) {
-          offscreenCtx.fillStyle = grid[y][x].c;
-          offscreenCtx.fillRect(x, y, 1, 1);
+      if (role === 'KENGAI') {
+        trunkLen = 64; startWidth = 14; initAngle = -Math.PI * 0.55;
+      } else if (role === 'BUNJINGI') {
+        trunkLen = 56; startWidth = 6.2; initAngle = -Math.PI * 0.52;
+      } else if (role === 'SHAKAN') {
+        trunkLen = 44; startWidth = 13.5; initAngle = -Math.PI * 0.42;
+      }
+
+      const trunkPts = drawSinuousBranch(trunkRootX, trunkRootY, initAngle, trunkLen, startWidth, true);
+
+      // Branching Scaffold
+      const startBranchingIndex = Math.floor(trunkPts.length * 0.28);
+      for (let i = startBranchingIndex; i < trunkPts.length; i++) {
+        const t = i / trunkPts.length;
+        const angleFlip = (i % 2 === 0) ? 1 : -1;
+
+        let subBranchAngle = -Math.PI * 0.51 + angleFlip * (0.35 + rng() * 0.45);
+        if (role === 'KENGAI') {
+          subBranchAngle = Math.PI * 0.12 - rng() * 0.45;
+        }
+
+        if (i % 6 === 0 || i === trunkPts.length - 1) {
+          const pt = trunkPts[i];
+          const bBranch = drawSinuousBranch(pt.x, pt.y, subBranchAngle, 12, pt.r * 0.65);
+
+          const lastPt = bBranch[bBranch.length - 1];
+          const padWidth = 48 * (1 - t * 0.45);
+          const padHeight = 16 * (1 - t * 0.45);
+          drawOrganicFoliagePad(lastPt.x, lastPt.y, padWidth, padHeight);
+
+          if (bBranch.length > 5 && rng() < 0.45) {
+            const midPt = bBranch[Math.floor(bBranch.length * 0.55)];
+            drawOrganicFoliagePad(midPt.x, midPt.y, padWidth * 0.75, padHeight * 0.75);
+          }
         }
       }
     }
-    return offscreenCanvas.toDataURL('image/png');
-  }
 
-  /* ================= STATE ================= */
+    return offscreenCanvas.toDataURL('image/png');
+  }  /* ================= STATE ================= */
   let State = {
     funds: 50000000, 
     fuelReserve: 250000, // Water
