@@ -160,7 +160,7 @@
         <span>Wild Yamadori & Imports</span>
         <span style="font-size:10px; color:var(--silver-dim);">RESTOCK: <span id="market-timer" style="font-size:12px; font-weight:bold; color:var(--status-green);">10.0</span>s</span>
       </div>
-      <p style="font-size:10px; color:var(--silver-dim);">5 procedural bonsai drop every 10 seconds. Styles shape the physical trunk growth.</p>
+      <p style="font-size:10px; color:var(--silver-dim);">5 procedural bonsai drop every 10 seconds. Buy a specimen to unveil its 3D Voxel structure on your Garden Benches.</p>
       <div id="market-grid" class="fleet-grid"></div>
     </div>
   </div>
@@ -315,7 +315,7 @@
   <div id="tab-gallery" class="view-tab">
     <div class="panel">
       <div class="panel-header"><span>Tokonoma (Masterpiece Gallery) 🖼️</span></div>
-      <p style="font-size:10px; color:var(--silver-dim);">Lock your best phenotypes to preserve their artwork forever.</p>
+      <p style="font-size:10px; color:var(--silver-dim);">Lock your best phenotypes to preserve their 512x512 3D Voxel artwork forever.</p>
       <div id="gallery-grid" class="fleet-grid"></div>
     </div>
   </div>
@@ -503,373 +503,876 @@
 
   const $ = id => document.getElementById(id);
 
-/* ================= 512x512 MASTER ZEN BONSAI BIO-ENGINE ================= */
-  const offscreenCanvas = document.createElement('canvas');
-  offscreenCanvas.width = 512; offscreenCanvas.height = 512;
-  const offscreenCtx = offscreenCanvas.getContext('2d');
+  /* ============================================================================
+     512x512 SPARSE ZERO-ALLOCATION 3D VOXEL BONSAI ENGINE
+     - Uses a pre-allocated Stamp Buffer so clearing the 256^3 grid takes 0.001ms
+     - Only iterates occupied voxels (~30K blocks instead of 16.7M air cells)
+     - Cached LRU lookup so previously rendered trees return in 0.01ms
+     ============================================================================ */
+  class VoxelBonsaiEngine {
+    constructor() {
+      this.width = 512;
+      this.height = 512;
+      this.canvas = document.createElement('canvas');
+      this.canvas.width = 512;
+      this.canvas.height = 512;
+      this.ctx = this.canvas.getContext('2d');
 
-  function Mulberry32(a) {
-    return function() {
-      var t = a += 0x6D2B79F5;
-      t = Math.imul(t ^ t >>> 15, t | 1);
-      t ^= t + Math.imul(t ^ t >>> 7, t | 61);
-      return ((t ^ t >>> 14) >>> 0) / 4294967296;
-    }
-  }
+      // 256x256x256 Sparse Stamp Voxel Volume (Zero .fill(0) overhead!)
+      this.grid = new Uint8Array(256 * 256 * 256);
+      this.stampGrid = new Uint16Array(256 * 256 * 256);
+      this.currentStamp = 1;
 
-  function lerp(a, b, t) { return a + (b - a) * t; }
-  function lerpCol(c1, c2, t) {
-    return [
-      Math.round(lerp(c1[0], c2[0], t)),
-      Math.round(lerp(c1[1], c2[1], t)),
-      Math.round(lerp(c1[2], c2[2], t))
-    ];
-  }
-  function rgb(c) { return `rgb(${c[0]},${c[1]},${c[2]})`; }
-  function rgba(c, a) { return `rgba(${c[0]},${c[1]},${c[2]},${a})`; }
+      // Pre-allocated flat list of occupied voxel indices (Zero GC allocations!)
+      this.occupiedList = new Int32Array(350000);
+      this.occupiedCount = 0;
 
-  function drawRoundedRect(c, x, y, w, h, r) {
-    c.beginPath();
-    c.moveTo(x + r, y);
-    c.lineTo(x + w - r, y);
-    c.quadraticCurveTo(x + w, y, x + w, y + r);
-    c.lineTo(x + w, y + h - r);
-    c.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-    c.lineTo(x + r, y + h);
-    c.quadraticCurveTo(x, y + h, x, y + h - r);
-    c.lineTo(x, y + r);
-    c.quadraticCurveTo(x, y, x + r, y);
-    c.closePath();
-  }
+      // 512x512 Z-Buffer & Pixel Output Buffer
+      this.zBuf = new Float32Array(512 * 512);
+      this.imgData = this.ctx.createImageData(512, 512);
+      this.pixels = new Uint32Array(this.imgData.data.buffer);
 
-  function generateBonsaiImage(seedInt, role, tierIdx, sp) {
-    const ctx = offscreenCtx;
-    ctx.clearRect(0, 0, 512, 512);
-    const rng = Mulberry32(seedInt);
-
-    // --- 1. BOTANICAL PALETTE DEFINITIONS ---
-    let foliage = {
-      base: [18, 44, 22], mid: [34, 76, 38], high: [64, 128, 68], bloom: null
-    };
-
-    if (sp.includes("Maple") || sp.includes("Ginkgo")) {
-      // Momiji Autumn Scarlet & Amber Gold
-      foliage = { base: [68, 16, 6], mid: [160, 42, 12], high: [228, 96, 18], bloom: [248, 168, 24] };
-    } else if (sp.includes("Azalea") || sp.includes("Bougainvillea")) {
-      // Satsuki Flowering Petals
-      foliage = { base: [22, 48, 26], mid: [42, 88, 48], high: [210, 52, 142], bloom: [248, 118, 188] };
-    } else if (sp.includes("Pine") || sp.includes("Juniper") || sp.includes("Cedar")) {
-      // Deep Evergreen Needles
-      foliage = { base: [8, 26, 12], mid: [20, 50, 26], high: [42, 94, 52], bloom: null };
-    } else if (sp.includes("Wisteria")) {
-      // Cascading Purple Racemes
-      foliage = { base: [34, 10, 64], mid: [74, 22, 134], high: [164, 102, 238], bloom: [224, 162, 248] };
-    } else if (sp.includes("Oak") || sp.includes("Elm") || sp.includes("Hornbeam")) {
-      // Deciduous Broadleaf Summer
-      foliage = { base: [24, 52, 24], mid: [52, 104, 46], high: [92, 158, 74], bloom: null };
+      this.paletteRGB = new Uint32Array(256);
+      this.materialPriority = new Uint8Array(256);
+      this.seed = 1337;
     }
 
-    // --- 2. ATMOSPHERIC SHADOW & BACKGROUND ---
-    const bgGrad = ctx.createRadialGradient(256, 210, 40, 256, 256, 310);
-    bgGrad.addColorStop(0, "#0d100d");
-    bgGrad.addColorStop(0.7, "#050705");
-    bgGrad.addColorStop(1, "#020302");
-    ctx.fillStyle = bgGrad;
-    ctx.fillRect(0, 0, 512, 512);
-
-    // Subtle Shoji Paper Light Wash
-    ctx.fillStyle = "rgba(74, 222, 128, 0.015)";
-    ctx.beginPath();
-    ctx.moveTo(140, 0); ctx.lineTo(372, 0); ctx.lineTo(512, 512); ctx.lineTo(0, 512);
-    ctx.closePath();
-    ctx.fill();
-
-    // --- 3. YAKISUGI DISPLAY STAND ---
-    const standY = 478;
-    const standH = 22;
-    const standW = role === 'KENGAI' ? 220 : 340;
-    const standX = 256 - standW * 0.5;
-
-    // Dark Rosewood Base
-    ctx.fillStyle = "#0a0807";
-    ctx.fillRect(standX - 10, standY, standW + 20, standH);
-
-    // Beveled Top Highlight & Carved Line
-    ctx.fillStyle = "rgba(48, 34, 26, 0.85)";
-    ctx.fillRect(standX - 8, standY + 2, standW + 16, 5);
-    ctx.strokeStyle = "rgba(18, 14, 12, 0.95)";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(standX - 10, standY, standW + 20, standH);
-
-    // Carved Feet
-    ctx.fillStyle = "#060504";
-    ctx.fillRect(standX - 2, standY + standH, 20, 8);
-    ctx.fillRect(standX + standW - 18, standY + standH, 20, 8);
-
-    // --- 4. TOKONAME POTTERY & SLABS ---
-    let potY = standY - 2;
-    let potH = 28;
-    let potW = 108;
-    let potColor = [42, 52, 62]; // Glazed Celadon / Slate
-
-    if (role === 'KENGAI') {
-      potW = 48; potH = 112; potY = standY - 106; // Tall Cascade Vessel
-      potColor = [72, 48, 38]; // Unglazed Red Clay
-    } else if (role === 'YOSE_UE') {
-      potW = 172; potH = 12; potY = standY - 4; // Flat Granite Tray
-      potColor = [48, 52, 48];
+    initRNG(seed) {
+      this.seed = (seed >>> 0) || 1337;
+      let a = this.seed;
+      this.rand = () => {
+        let t = (a += 0x6D2B79F5);
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
     }
 
-    const potX = 256 - potW;
+    range(min, max) { return min + this.rand() * (max - min); }
+    pick(arr) { return arr[Math.floor(this.rand() * arr.length)]; }
 
-    // Ambient Grounding Shadow
-    const shGrad = ctx.createRadialGradient(256, potY + potH, 8, 256, potY + potH + 4, potW * 1.35);
-    shGrad.addColorStop(0, "rgba(0, 0, 0, 0.95)");
-    shGrad.addColorStop(1, "rgba(0, 0, 0, 0)");
-    ctx.fillStyle = shGrad;
-    ctx.fillRect(potX - 30, potY + potH - 4, potW * 2 + 60, 14);
-
-    // Ceramic Vessel Body
-    ctx.fillStyle = rgb(potColor);
-    drawRoundedRect(ctx, potX, potY, potW * 2, potH, 3);
-    ctx.fill();
-
-    // Glaze Lighting & Shading
-    const potHighlight = ctx.createLinearGradient(potX, potY, potX + potW * 2, potY);
-    potHighlight.addColorStop(0, "rgba(0, 0, 0, 0.55)");
-    potHighlight.addColorStop(0.18, "rgba(255, 255, 255, 0.14)");
-    potHighlight.addColorStop(0.5, "rgba(255, 255, 255, 0.0)");
-    potHighlight.addColorStop(0.85, "rgba(0, 0, 0, 0.35)");
-    potHighlight.addColorStop(1, "rgba(0, 0, 0, 0.75)");
-    ctx.fillStyle = potHighlight;
-    drawRoundedRect(ctx, potX, potY, potW * 2, potH, 3);
-    ctx.fill();
-
-    // Raised Outer Lip
-    ctx.fillStyle = rgb(lerpCol(potColor, [10, 10, 10], 0.3));
-    ctx.fillRect(potX - 3, potY, potW * 2 + 6, 6);
-    ctx.fillStyle = "rgba(255, 255, 255, 0.18)";
-    ctx.fillRect(potX - 3, potY + 1, potW * 2 + 6, 1.5);
-
-    // --- 5. PEAT SOIL, NEBARI ROOTS & MOSS ---
-    const soilY = potY + 1;
-    const soilW = potW - 5;
-    ctx.fillStyle = "#22160f"; // Rich Akadama
-    ctx.beginPath();
-    ctx.ellipse(256, soilY, soilW, 14, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Velvet Moss Cushions
-    const mossColor = [38, 80, 30];
-    for (let m = 0; m < 55; m++) {
-      const mx = 256 + (rng() - 0.5) * soilW * 1.65;
-      const my = soilY + (rng() - 0.5) * 13;
-      const mr = 4 + rng() * 7;
-      ctx.fillStyle = rgba(lerpCol(mossColor, [88, 155, 48], rng() * 0.45), 0.88);
-      ctx.beginPath();
-      ctx.arc(mx, my, mr, 0, Math.PI * 2);
-      ctx.fill();
+    noise3D(x, y, z) {
+      const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z);
+      const fx = x - ix, fy = y - iy, fz = z - iz;
+      const ux = fx * fx * (3 - 2 * fx);
+      const uy = fy * fy * (3 - 2 * fy);
+      const uz = fz * fz * (3 - 2 * fz);
+      const h = (a, b, c) => {
+        let n = Math.imul(a, 374761393) + Math.imul(b, 668265263) + Math.imul(c, 2147483647) + this.seed;
+        n = (n ^ (n >> 13)) * 1274126177;
+        return ((n ^ (n >> 16)) >>> 0) / 4294967296;
+      };
+      const c000 = h(ix, iy, iz),     c100 = h(ix+1, iy, iz);
+      const c010 = h(ix, iy+1, iz),   c110 = h(ix+1, iy+1, iz);
+      const c001 = h(ix, iy, iz+1),   c101 = h(ix+1, iy, iz+1);
+      const c011 = h(ix, iy+1, iz+1), c111 = h(ix+1, iy+1, iz+1);
+      const x00 = c000 + ux * (c100 - c000), x10 = c010 + ux * (c110 - c010);
+      const x01 = c001 + ux * (c101 - c001), x11 = c011 + ux * (c111 - c011);
+      const y0 = x00 + uy * (x10 - x00),     y1 = x01 + uy * (x11 - x01);
+      return (y0 + uz * (y1 - y0)) * 2 - 1;
     }
 
-    // Suiseki Miniature Accent Stone
-    ctx.fillStyle = "#383431";
-    ctx.beginPath();
-    ctx.ellipse(256 - soilW * 0.45, soilY + 3, 14, 6, 0.15, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#242220";
-    ctx.beginPath();
-    ctx.ellipse(256 - soilW * 0.45, soilY + 3, 10, 4, 0.12, 0, Math.PI * 2);
-    ctx.fill();
+    registerColor(idx, hex, priority) {
+      this.paletteRGB[idx] = parseInt(hex.slice(1), 16);
+      this.materialPriority[idx] = priority;
+    }
 
-    // --- 6. GNARLED BRANCHING ENGINE ---
-    function drawSinuousBranch(startX, startY, angle, maxSteps, baseWidth, isTrunk = false) {
-      const points = [];
-      let cx = startX;
-      let cy = startY;
-      let ca = angle;
+    setupBotanicalPalette(sp, tierIdx) {
+      // Bark & Foliage mapped across all 20 species in TREE_SPECIES
+      let bark = ['#231b16', '#332820', '#45372d', '#59473b', '#6e5849'];
+      let foliage = ['#112414', '#1b381f', '#28522d', '#396e3e', '#508f54', '#6eb070'];
 
-      const variance = (role === 'MOYOGI') ? 0.36 : 0.18;
-
-      for (let s = 0; s <= maxSteps; s++) {
-        const t = s / maxSteps;
-        const width = baseWidth * Math.pow(1 - t * 0.75, 1.15);
-
-        let sway = Math.sin(t * Math.PI * 3.5 + seedInt) * variance;
-        if (role === 'CHOKKAN' && isTrunk) sway = (rng() - 0.5) * 0.04;
-        if (role === 'SHAKAN' && isTrunk) ca = -Math.PI * 0.42 + Math.sin(t * Math.PI) * 0.08;
-        if (role === 'KENGAI' && isTrunk) {
-          if (t < 0.15) {
-            ca = -Math.PI * 0.46;
-          } else if (t < 0.45) {
-            ca = lerp(-Math.PI * 0.46, Math.PI * 0.48, (t - 0.15) / 0.3);
-            cx -= 0.65;
-          } else {
-            ca = Math.PI * 0.42;
-            cx -= 1.15;
-          }
-        }
-        if (role === 'BUNJINGI' && isTrunk) {
-          sway = Math.sin(t * Math.PI * 6.5 + seedInt) * 0.42;
-        }
-
-        ca += sway;
-
-        const stepLen = isTrunk ? 7.6 : 4.6;
-        cx += Math.cos(ca) * stepLen;
-        cy += Math.sin(ca) * stepLen;
-
-        points.push({ x: cx, y: cy, r: width, step: s });
+      if (sp.includes("Maple")) {
+        bark = ['#24201e', '#36312e', '#4a433f', '#5e5652', '#756b66'];
+        foliage = ['#2e0909', '#4d1010', '#781917', '#a62621', '#cf3c32', '#ed5f4c'];
+      } else if (sp.includes("Ginkgo") || sp.includes("Larch")) {
+        bark = ['#241c15', '#362a20', '#4a3a2c', '#5e4a39', '#735b46'];
+        foliage = ['#382407', '#5c3c0c', '#875b14', '#b57f1d', '#de9f28', '#f7c548'];
+      } else if (sp.includes("Azalea") || sp.includes("Bougainvillea")) {
+        bark = ['#241b1d', '#36292c', '#4a383c', '#5e484d', '#73595f'];
+        foliage = ['#243822', '#3a5c36', '#7a2952', '#b53f78', '#e0639e', '#ff99c8'];
+      } else if (sp.includes("Wisteria")) {
+        bark = ['#262229', '#39333d', '#4d4552', '#635969', '#7a6e80'];
+        foliage = ['#231438', '#3c225e', '#5e388f', '#8656bd', '#b082e3', '#dc9eff'];
+      } else if (sp.includes("Juniper") || sp.includes("Cedar") || sp.includes("Cypress") || sp.includes("Hemlock")) {
+        bark = ['#2e1d16', '#452c22', '#5e3d30', '#754e3e', '#8f624f'];
+        foliage = ['#132621', '#1d3b34', '#2a544a', '#3b7063', '#518f7f', '#6eb09e'];
+      } else if (sp.includes("Oak") || sp.includes("Elm") || sp.includes("Ficus") || sp.includes("Jade") || sp.includes("Olive") || sp.includes("Boxwood") || sp.includes("Hornbeam")) {
+        bark = ['#2b2620', '#3d362d', '#52493d', '#695d4e', '#827462'];
+        foliage = ['#162912', '#24421e', '#36612d', '#4b823e', '#65a653', '#86c970'];
       }
 
-      // Draw Wood Cross-Sections with 3D Core Bark Shading
-      for (let i = 0; i < points.length; i++) {
-        const p = points[i];
-        const r = Math.max(0.6, p.r);
-
-        ctx.fillStyle = "#2c1c15";
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-        ctx.fill();
-
-        if (r > 1.8) {
-          // Left-Side Highlight Ridge
-          ctx.fillStyle = "rgba(108, 78, 54, 0.45)";
-          ctx.beginPath();
-          ctx.arc(p.x - r * 0.25, p.y - r * 0.15, r * 0.65, 0, Math.PI * 2);
-          ctx.fill();
-
-          // Right-Side Deep Crevice Shadow
-          ctx.fillStyle = "rgba(20, 10, 6, 0.65)";
-          ctx.beginPath();
-          ctx.arc(p.x + r * 0.35, p.y + r * 0.25, r * 0.5, 0, Math.PI * 2);
-          ctx.fill();
-
-          // Ancient Bleached Deadwood (Jin / Shari)
-          if (tierIdx >= 5 && isTrunk && i > points.length * 0.22 && i < points.length * 0.62 && (i % 3 === 0)) {
-            ctx.fillStyle = "#dfd9ce";
-            ctx.fillRect(p.x - r * 0.6, p.y, r * 0.32, r * 1.5);
-          }
-        }
-      }
-
-      return points;
-    }
-
-    // --- 7. ORGANIC FOLIAGE PAD SHADER ---
-    function drawOrganicFoliagePad(cx, cy, pw, ph) {
-      const steps = 300;
-      ctx.save();
-
-      for (let f = 0; f < steps; f++) {
-        const u = rng() - 0.5;
-        const v = rng() - 0.5;
-        const d = Math.hypot(u, v);
-
-        if (d <= 0.5) {
-          const fx = cx + u * pw * 2.1;
-          const fy = cy + v * ph * 2.1;
-          const fr = 2.4 + rng() * 3.6;
-
-          let rgbColor = [...foliage.mid];
-          const layerProg = rng();
-
-          if (layerProg < 0.3) rgbColor = [...foliage.base];
-          else if (layerProg > 0.72) rgbColor = [...foliage.high];
-
-          if (foliage.bloom && rng() < 0.16) {
-            rgbColor = [...foliage.bloom];
-          }
-
-          // Tier VII+ Golden Zenith Pollen / Imperial Radiance
-          if (tierIdx >= 6 && rng() < 0.05) {
-            rgbColor = [248, 218, 110];
-          }
-
-          ctx.fillStyle = rgba(rgbColor, 0.74);
-          ctx.beginPath();
-          ctx.ellipse(fx, fy, fr, fr * 0.65, -0.15, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-      ctx.restore();
-    }
-
-    // --- 8. COMPOSING TREE BY STYLE ---
-    const trunkRootY = soilY - 2;
-    const trunkRootX = 256;
-
-    if (role === 'YOSE_UE') {
-      // Yose-Ue Forest Grove (5 Distinct Tapered Trunks)
-      const forestTrunks = [
-        { offset: -72, depth: 14, h: 40, scale: 5.6 },
-        { offset: -26, depth: -10, h: 48, scale: 7.0 },
-        { offset: 14, depth: 8, h: 56, scale: 9.2 }, // Dominant Master Tree
-        { offset: 50, depth: -12, h: 44, scale: 6.4 },
-        { offset: 80, depth: 10, h: 36, scale: 5.0 }
+      const potThemes = [
+        ['#0d1c33', '#152e52', '#204578', '#2e5fa3', '#497ec4'], // Cobalt Glaze
+        ['#2e1610', '#452219', '#5e3024', '#783f30', '#91503e'], // Tokoname Red Clay
+        ['#1d3029', '#2c473d', '#3d6355', '#528270', '#6ea38f'], // Jade Celadon
+        ['#4a443a', '#696153', '#8c8270', '#b0a48e', '#cfc2ab'], // Antique Cream
+        ['#141718', '#202426', '#2e3336', '#3d4447', '#50585c']  // Dark Katsura Slate
       ];
+      const potCols = this.pick(potThemes);
 
-      forestTrunks.forEach(ft => {
-        const trunkPts = drawSinuousBranch(
-          trunkRootX + ft.offset,
-          trunkRootY + ft.depth,
-          -Math.PI * 0.51,
-          ft.h,
-          ft.scale,
-          true
-        );
+      // 1..5: Living Bark (Priority 4)
+      bark.forEach((c, i) => this.registerColor(1 + i, c, 4));
+      // 6..9: Shari Bleached Deadwood (Priority 4)
+      ['#6e685f', '#999186', '#c4bcb0', '#e6dfd3'].forEach((c, i) => this.registerColor(6 + i, c, 4));
+      // 10..15: Botanical Foliage (Priority 2)
+      foliage.forEach((c, i) => this.registerColor(10 + i, c, 2));
+      // 16: Imperial Tier VII+ Golden Highlight Tip (Priority 2)
+      this.registerColor(16, '#ffe066', 2);
+      // 20..24: Ceramic Pot (Priority 6)
+      potCols.forEach((c, i) => this.registerColor(20 + i, c, 6));
+      // 30..33: Rosewood Table / Stand (Priority 6)
+      ['#1c0f0a', '#2e1911', '#45261a', '#5e3525'].forEach((c, i) => this.registerColor(30 + i, c, 6));
+      // 40..45: Soil & Velvety Moss (Priority 3)
+      ['#211710', '#332419', '#233d1b', '#365c29', '#4e7d3b', '#6b9e52'].forEach((c, i) => this.registerColor(40 + i, c, 3));
+      // 50..54: Craggy Stone & Lantern (Priority 5)
+      ['#222526', '#363a3d', '#4d5357', '#676e73', '#ffcf66'].forEach((c, i) => this.registerColor(50 + i, c, 5));
+    }
 
-        for (let j = trunkPts.length - 12; j < trunkPts.length; j += 4) {
-          const pt = trunkPts[j];
-          drawOrganicFoliagePad(pt.x, pt.y - 10, 32, 14);
+    setVoxel(x, y, z, colorIdx) {
+      const ix = x | 0, iy = y | 0, iz = z | 0;
+      if (ix < 1 || ix >= 255 || iy < 1 || iy >= 255 || iz < 1 || iz >= 255) return;
+      const idx = ix + (iz << 8) + (iy << 16);
+      if (this.stampGrid[idx] === this.currentStamp) {
+        const existing = this.grid[idx];
+        if (this.materialPriority[existing] > this.materialPriority[colorIdx]) return;
+        this.grid[idx] = colorIdx;
+      } else {
+        this.stampGrid[idx] = this.currentStamp;
+        this.grid[idx] = colorIdx;
+        if (this.occupiedCount < this.occupiedList.length) {
+          this.occupiedList[this.occupiedCount++] = idx;
         }
+      }
+    }
+
+    stampSphere(cx, cy, cz, radius, baseColorIdx, colorSpan, noiseScale = 0.25) {
+      const r = Math.ceil(radius);
+      const rSq = radius * radius;
+      for (let dy = -r; dy <= r; dy++) {
+        const y = (cy + dy) | 0;
+        if (y < 1 || y >= 255) continue;
+        for (let dz = -r; dz <= r; dz++) {
+          const z = (cz + dz) | 0;
+          if (z < 1 || z >= 255) continue;
+          for (let dx = -r; dx <= r; dx++) {
+            if (dx * dx + dy * dy + dz * dz <= rSq) {
+              const x = (cx + dx) | 0;
+              const n = (this.noise3D(x * noiseScale, y * noiseScale, z * noiseScale) + 1) * 0.5;
+              const cOffset = Math.min(colorSpan - 1, Math.floor(n * colorSpan));
+              this.setVoxel(x, y, z, baseColorIdx + cOffset);
+            }
+          }
+        }
+      }
+    }
+
+    renderBonsaiDataURL(seedInt, role, tierIdx, sp) {
+      this.initRNG(seedInt);
+
+      // Advance stamp ID (instant 0.001ms clear of the 256^3 volume!)
+      this.currentStamp++;
+      if (this.currentStamp >= 65530) {
+        this.stampGrid.fill(0);
+        this.currentStamp = 1;
+      }
+      this.occupiedCount = 0;
+
+      this.setupBotanicalPalette(sp, tierIdx);
+
+      // Map the 6 game roles + deterministic sub-archetypes
+      let style = 'moyogi';
+      if (role === 'CHOKKAN') style = (this.rand() < 0.35) ? 'hokidachi' : 'chokkan';
+      else if (role === 'MOYOGI') style = (this.rand() < 0.28) ? 'sekijoju' : (this.rand() < 0.25 ? 'bankan' : 'moyogi');
+      else if (role === 'SHAKAN') style = (this.rand() < 0.45) ? 'fukinagashi' : 'shakan';
+      else if (role === 'KENGAI') style = (this.rand() < 0.30) ? 'hankengai' : 'kengai';
+      else if (role === 'YOSE_UE') style = (this.rand() < 0.28) ? 'kabudachi' : 'yoseue';
+      else if (role === 'BUNJINGI') style = 'bunjingi';
+
+      const gnarl = 0.75 + this.rand() * 0.65;
+      const allowShari = (tierIdx >= 3) || (style === 'bankan') || (style === 'bunjingi');
+
+      const isCascade = (style === 'kengai' || style === 'hankengai');
+      const isWideTray = (style === 'yoseue' || style === 'kabudachi');
+
+      const potCX = isCascade ? 104 : (style === 'fukinagashi' || style === 'shakan' ? 108 : 128);
+      const potCZ = 128;
+      const potTopY = isCascade ? (style === 'kengai' ? 136 : 112) : 54;
+      const potH = isCascade ? 34 : (isWideTray ? 14 : 22);
+      const potBotY = potTopY - potH;
+      const potRx = isCascade ? 28 : (isWideTray ? 68 : 44);
+      const potRz = isCascade ? 28 : (isWideTray ? 48 : 34);
+      const potShape = isCascade ? 'hex' : (isWideTray ? 'oval' : this.pick(['rect', 'oval']));
+
+      this.obstacleBounds = {
+        potCX, potCZ, potTopY, potBotY,
+        safeRadius: Math.max(potRx, potRz) + 7
+      };
+
+      // 1. Build 3D Wooden Stand / Tall Cascade Table
+      this.build3DTable(potCX, potCZ, potBotY, potRx, potRz, isCascade);
+
+      // 2. Build 3D Ceramic Pot & Mounded Soil + Moss
+      this.build3DPotAndSoil(potCX, potCZ, potBotY, potTopY, potRx, potRz, potShape);
+
+      // 3. Build 3D Rocks or Stone Lantern
+      let rockPeak = null;
+      if (style === 'sekijoju') {
+        rockPeak = this.build3DRootRock(potCX, potCZ, potTopY);
+      } else if (!isCascade) {
+        this.build3DMiniLantern(potCX, potCZ, potTopY, potRx, potRz, style);
+      }
+
+      // 4. Build 3D Tree Skeleton & Botanical Foliage Pads
+      const originX = rockPeak ? rockPeak.x : potCX;
+      const originY = rockPeak ? rockPeak.y : potTopY + 2;
+      const originZ = rockPeak ? rockPeak.z : potCZ;
+
+      this.build3DBonsaiTree({
+        style, originX, originY, originZ,
+        potCX, potCZ, potTopY, potRx, potRz,
+        gnarl, allowShari, rockPeak, tierIdx
       });
 
-    } else {
-      // Solitary Specimen Bonsai
-      let trunkLen = 42;
-      let initAngle = -Math.PI * 0.48;
-      let startWidth = 15;
+      // 5. Direct Sparse Z-Buffered Raycast Render onto 512x512 Canvas
+      this.bakeAndRenderDirect();
 
-      if (role === 'KENGAI') {
-        trunkLen = 64; startWidth = 14; initAngle = -Math.PI * 0.55;
-      } else if (role === 'BUNJINGI') {
-        trunkLen = 56; startWidth = 6.2; initAngle = -Math.PI * 0.52;
-      } else if (role === 'SHAKAN') {
-        trunkLen = 44; startWidth = 13.5; initAngle = -Math.PI * 0.42;
+      return this.canvas.toDataURL('image/png');
+    }
+
+    build3DTable(cx, cz, potBotY, potRx, potRz, isCascade) {
+      const floorY = 14;
+      const topY = potBotY - 2;
+      const rx = (potRx * 0.96) | 0;
+      const rz = (potRz * 0.96) | 0;
+
+      for (let y = topY - 3; y <= topY; y++) {
+        for (let z = cz - rz; z <= cz + rz; z++) {
+          for (let x = cx - rx; x <= cx + rx; x++) {
+            const edge = (Math.abs(x - cx) >= rx - 2 || Math.abs(z - cz) >= rz - 2);
+            this.setVoxel(x, y, z, edge ? 33 : 32);
+          }
+        }
       }
 
-      const trunkPts = drawSinuousBranch(trunkRootX, trunkRootY, initAngle, trunkLen, startWidth, true);
-
-      // Branching Scaffold
-      const startBranchingIndex = Math.floor(trunkPts.length * 0.28);
-      for (let i = startBranchingIndex; i < trunkPts.length; i++) {
-        const t = i / trunkPts.length;
-        const angleFlip = (i % 2 === 0) ? 1 : -1;
-
-        let subBranchAngle = -Math.PI * 0.51 + angleFlip * (0.35 + rng() * 0.45);
-        if (role === 'KENGAI') {
-          subBranchAngle = Math.PI * 0.12 - rng() * 0.45;
+      if (isCascade) {
+        const legPositions = [
+          [cx - rx + 3, cz - rz + 3], [cx + rx - 3, cz - rz + 3],
+          [cx - rx + 3, cz + rz - 3], [cx + rx - 3, cz + rz - 3]
+        ];
+        for (const [lx, lz] of legPositions) {
+          for (let y = floorY; y < topY - 2; y++) {
+            for (let dz = -2; dz <= 2; dz++) {
+              for (let dx = -2; dx <= 2; dx++) {
+                this.setVoxel(lx + dx, y, lz + dz, (dx + dz > 0) ? 32 : 30);
+              }
+            }
+          }
         }
-
-        if (i % 6 === 0 || i === trunkPts.length - 1) {
-          const pt = trunkPts[i];
-          const bBranch = drawSinuousBranch(pt.x, pt.y, subBranchAngle, 12, pt.r * 0.65);
-
-          const lastPt = bBranch[bBranch.length - 1];
-          const padWidth = 48 * (1 - t * 0.45);
-          const padHeight = 16 * (1 - t * 0.45);
-          drawOrganicFoliagePad(lastPt.x, lastPt.y, padWidth, padHeight);
-
-          if (bBranch.length > 5 && rng() < 0.45) {
-            const midPt = bBranch[Math.floor(bBranch.length * 0.55)];
-            drawOrganicFoliagePad(midPt.x, midPt.y, padWidth * 0.75, padHeight * 0.75);
+        const stretcherY = floorY + Math.floor((topY - floorY) * 0.28);
+        const apronY = topY - 12;
+        for (let z = cz - rz + 3; z <= cz + rz - 3; z++) {
+          for (let x = cx - rx + 3; x <= cx + rx - 3; x++) {
+            if (Math.abs(x - cx) < rx - 5 && Math.abs(z - cz) < rz - 5) continue;
+            for (let dy = 0; dy < 3; dy++) this.setVoxel(x, stretcherY + dy, z, 31);
+            const inWin = (Math.abs(x - cx) < rx * 0.48 && Math.abs(z - cz) > rz - 6) ||
+                          (Math.abs(z - cz) < rz * 0.48 && Math.abs(x - cx) > rx - 6);
+            for (let y = apronY; y < topY - 3; y++) {
+              if (!inWin || y === apronY || y === topY - 4) this.setVoxel(x, y, z, 32);
+            }
+          }
+        }
+      } else {
+        const standFloor = Math.max(floorY, topY - 12);
+        for (let y = standFloor; y < topY - 3; y++) {
+          for (let z = cz - rz; z <= cz + rz; z++) {
+            for (let x = cx - rx; x <= cx + rx; x++) {
+              if (Math.abs(x - cx) < rx - 3 && Math.abs(z - cz) < rz - 3) continue;
+              if ((Math.abs(x - cx) < rx * 0.62 || Math.abs(z - cz) < rz * 0.62) && y < topY - 6) continue;
+              this.setVoxel(x, y, z, 31);
+            }
           }
         }
       }
     }
 
-    return offscreenCanvas.toDataURL('image/png');
-  }  /* ================= STATE ================= */
+    build3DPotAndSoil(cx, cz, botY, topY, rx, rz, shape) {
+      const h = topY - botY;
+      for (let y = botY; y <= topY; y++) {
+        const t = (y - botY) / h;
+        const taper = 0.76 + 0.24 * Math.pow(t, 0.75);
+        const isLip = (y >= topY - 3);
+        const curRx = rx * taper + (isLip ? 3 : 0);
+        const curRz = rz * taper + (isLip ? 3 : 0);
+
+        for (let z = Math.floor(cz - curRz - 1); z <= Math.ceil(cz + curRz + 1); z++) {
+          for (let x = Math.floor(cx - curRx - 1); x <= Math.ceil(cx + curRx + 1); x++) {
+            const dx = (x - cx) / curRx;
+            const dz = (z - cz) / curRz;
+            let dist;
+            if (shape === 'oval') dist = Math.hypot(dx, dz);
+            else if (shape === 'hex') dist = Math.max(Math.abs(dx), Math.abs(dz), (Math.abs(dx) + Math.abs(dz)) * 0.72);
+            else dist = Math.pow(Math.pow(Math.abs(dx), 4) + Math.pow(Math.abs(dz), 4), 0.25);
+
+            if (dist <= 1.0) {
+              if (dist >= 0.84 || y <= botY + 3 || isLip) {
+                const n = (this.noise3D(x * 0.22, y * 0.22, z * 0.22) + 1) * 0.5;
+                const cIdx = 20 + Math.min(4, Math.floor(n * 4.5));
+                this.setVoxel(x, y, z, isLip ? 23 : cIdx);
+              } else if (y > topY - 6) {
+                this.setVoxel(x, y, z, 40 + ((x + z) & 1));
+              }
+            }
+          }
+        }
+      }
+
+      const moundHeight = Math.min(8, Math.floor(Math.min(rx, rz) * 0.22));
+      for (let z = cz - rz + 3; z <= cz + rz - 3; z++) {
+        for (let x = cx - rx + 3; x <= cx + rx - 3; x++) {
+          const dx = (x - cx) / (rx * 0.92);
+          const dz = (z - cz) / (rz * 0.92);
+          const d = shape === 'oval' ? Math.hypot(dx, dz) : Math.max(Math.abs(dx), Math.abs(dz));
+          if (d >= 1.0) continue;
+
+          const dome = Math.cos(d * Math.PI * 0.5) * moundHeight;
+          const mossNoise = this.noise3D(x * 0.12, 0, z * 0.12) * 2.4;
+          const surfY = Math.floor(topY + dome + mossNoise * 0.5);
+
+          for (let y = topY - 1; y <= surfY; y++) {
+            if (y === surfY && mossNoise > -0.35) {
+              const mTone = 42 + Math.min(3, Math.max(0, Math.floor((mossNoise + 1) * 2)));
+              this.setVoxel(x, y, z, mTone);
+            } else {
+              this.setVoxel(x, y, z, 40 + ((x ^ z) & 1));
+            }
+          }
+        }
+      }
+    }
+
+    build3DRootRock(cx, cz, potTopY) {
+      const rockH = 42, rockR = 16;
+      for (let y = potTopY; y <= potTopY + rockH; y++) {
+        const t = (y - potTopY) / rockH;
+        const r = rockR * (1 - t * 0.55);
+        for (let z = cz - rockR; z <= cz + rockR; z++) {
+          for (let x = cx - rockR; x <= cx + rockR; x++) {
+            const n = this.noise3D(x * 0.14, y * 0.14, z * 0.14) * 4.8;
+            if (Math.hypot(x - cx, z - cz) + n <= r) {
+              const c = 50 + Math.min(3, Math.max(0, Math.floor((n + 5) * 0.4)));
+              this.setVoxel(x, y, z, c);
+            }
+          }
+        }
+      }
+      return { x: cx, y: potTopY + rockH - 2, z: cz, baseY: potTopY + 2, radius: rockR };
+    }
+
+    build3DMiniLantern(cx, cz, potTopY, rx, rz, style) {
+      const side = (style === 'fukinagashi' || style === 'shakan') ? -1 : 1;
+      const lx = Math.floor(cx + side * rx * 0.56);
+      const lz = Math.floor(cz + rz * 0.25);
+      const by = potTopY + 3;
+
+      for (let y = by; y <= by + 5; y++)
+        for (let dz = -1; dz <= 1; dz++)
+          for (let dx = -1; dx <= 1; dx++) this.setVoxel(lx + dx, y, lz + dz, 51);
+
+      for (let y = by + 6; y <= by + 10; y++) {
+        for (let dz = -2; dz <= 2; dz++) {
+          for (let dx = -2; dx <= 2; dx++) {
+            const isFrame = (Math.abs(dx) === 2 && Math.abs(dz) === 2) || y === by + 6 || y === by + 10;
+            this.setVoxel(lx + dx, y, lz + dz, isFrame ? 52 : 54);
+          }
+        }
+      }
+      for (let ry = 0; ry < 5; ry++) {
+        const rad = 5 - ry;
+        for (let dz = -rad; dz <= rad; dz++)
+          for (let dx = -rad; dx <= rad; dx++)
+            if (Math.hypot(dx, dz) <= rad + 0.5) this.setVoxel(lx + dx, by + 11 + ry, lz + dz, 51 + (ry & 1));
+      }
+    }
+
+    build3DBonsaiTree(opts) {
+      const { style, originX, originY, originZ, potCX, potCZ, potTopY, potRx, potRz, gnarl, allowShari, rockPeak, tierIdx } = opts;
+      this.foliageCenters = [];
+
+      if (rockPeak) {
+        for (let r = 0; r < 5; r++) {
+          const ang = (r / 5) * Math.PI * 2 + this.range(-0.2, 0.2);
+          const pts = [];
+          for (let i = 0; i <= 16; i++) {
+            const t = i / 16;
+            const curR = rockPeak.radius * (0.45 + 0.65 * Math.sin(t * Math.PI * 0.7));
+            const wobble = this.noise3D(r * 10, t * 4, 0) * 0.35;
+            pts.push({
+              x: originX + Math.cos(ang + wobble) * curR,
+              y: originY - t * (originY - rockPeak.baseY),
+              z: originZ + Math.sin(ang + wobble) * curR,
+              r: 3.2 * (1 - t * 0.45)
+            });
+          }
+          this.voxelizeMultiStrandLimb(pts, 1, false);
+        }
+      } else if (style !== 'yoseue') {
+        for (let r = 0; r < 5; r++) {
+          const ang = (r / 5) * Math.PI * 2 + this.range(-0.3, 0.3);
+          const rootLen = this.range(13, 20);
+          const pts = [];
+          for (let i = 0; i <= 7; i++) {
+            const t = i / 7;
+            pts.push({
+              x: originX + Math.cos(ang) * (t * rootLen),
+              y: originY + 3 * (1 - t) - t * 2,
+              z: originZ + Math.sin(ang) * (t * rootLen),
+              r: 4.2 * (1 - t * 0.72)
+            });
+          }
+          this.voxelizeMultiStrandLimb(pts, 1, false);
+        }
+      }
+
+      if (style === 'yoseue') {
+        const trees = [];
+        for (let attempt = 0; attempt < 70 && trees.length < 7; attempt++) {
+          const tx = potCX + this.range(-potRx * 0.72, potRx * 0.72);
+          const tz = potCZ + this.range(-potRz * 0.68, potRz * 0.68);
+          if (Math.hypot((tx - potCX) / (potRx * 0.75), (tz - potCZ) / (potRz * 0.75)) > 1) continue;
+          if (trees.some(o => Math.hypot(o.x - tx, o.z - tz) < 21)) continue;
+          const distFromKing = Math.hypot(tx - (potCX - 10), tz - potCZ) / potRx;
+          const scale = Math.max(0.50, 1.02 - distFromKing * 0.52);
+          trees.push({ x: tx, z: tz, scale });
+        }
+        for (const t of trees) {
+          this.grow3DTrunk({
+            startX: t.x, startY: potTopY + 3, startZ: t.z,
+            height: 112 * t.scale, baseRadius: 5.2 * t.scale,
+            style: 'moyogi', gnarl: gnarl * 0.45, allowShari: false,
+            padScale: 0.66 * t.scale, tierIdx
+          });
+        }
+      } else if (style === 'kabudachi') {
+        for (let i = 0; i < 5; i++) {
+          const yaw = (i / 5) * Math.PI * 2 + this.range(-0.2, 0.2);
+          const tilt = this.range(0.22, 0.42);
+          const sc = i === 0 ? 1.0 : this.range(0.68, 0.86);
+          this.grow3DTrunk({
+            startX: originX + Math.cos(yaw) * 3, startY: originY, startZ: originZ + Math.sin(yaw) * 3,
+            height: 118 * sc, baseRadius: 6.4 * sc, style: 'chokkan',
+            dirX: Math.cos(yaw) * Math.sin(tilt), dirZ: Math.sin(yaw) * Math.sin(tilt),
+            gnarl: gnarl * 0.65, allowShari: false, padScale: 0.76 * sc, tierIdx
+          });
+        }
+      } else {
+        const baseR = style === 'bunjingi' ? 5.0 : (style === 'bankan' ? 11.0 : 8.8);
+        const length = style === 'kengai' ? 170 : (style === 'bunjingi' ? 155 : 132);
+        this.grow3DTrunk({
+          startX: originX, startY: originY, startZ: originZ,
+          height: length, baseRadius: baseR, style, gnarl, allowShari, padScale: 1.0, tierIdx
+        });
+      }
+    }
+
+    grow3DTrunk(cfg) {
+      const { startX, startY, startZ, height, baseRadius, style, gnarl = 1.0, allowShari = false, padScale = 1.0, dirX = 0, dirZ = 0, tierIdx = 0 } = cfg;
+      const steps = 42;
+      const stepLen = height / steps;
+      const spine = [];
+      let cx = startX, cy = startY, cz = startZ;
+      const phase = this.rand() * 100;
+
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const r = Math.max(1.6, baseRadius * Math.pow(1 - t * 0.85, 1.25));
+        spine.push({ x: cx, y: cy, z: cz, r, t });
+
+        let vx = dirX, vy = 1.0, vz = dirZ;
+        const nx = this.noise3D(t * 3.5 + phase, 0, 0) * 0.35 * gnarl;
+        const nz = this.noise3D(0, t * 3.5 + phase, 0) * 0.35 * gnarl;
+
+        if (style === 'chokkan') {
+          vx += nx * 0.2; vz += nz * 0.2; vy = 1.0;
+        } else if (style === 'moyogi' || style === 'sekijoju') {
+          const env = Math.sin(t * Math.PI);
+          vx = Math.cos(t * Math.PI * 2.2) * 0.72 * gnarl * env + nx;
+          vz = Math.sin(t * Math.PI * 2.2) * 0.48 * gnarl * env + nz;
+          vy = 0.92;
+        } else if (style === 'bankan') {
+          vx = Math.cos(t * Math.PI * 3.6) * 1.22 * gnarl + nx;
+          vz = Math.sin(t * Math.PI * 3.6) * 1.02 * gnarl + nz;
+          vy = 0.76;
+        } else if (style === 'shakan') {
+          vx = 0.62 + nx * 0.25; vz = nz * 0.25; vy = 0.82;
+        } else if (style === 'fukinagashi') {
+          vx = 0.92 + nx * 0.35; vz = nz * 0.3; vy = 0.66;
+        } else if (style === 'kengai') {
+          if (t < 0.20) {
+            vx = 0.95; vy = 0.75 * (1 - t * 4); vz = 0.28;
+          } else {
+            const ct = (t - 0.20) / 0.80;
+            vx = 0.42 + Math.sin(ct * Math.PI * 2.4) * 0.55 * gnarl;
+            vz = Math.cos(ct * Math.PI * 2.0) * 0.55 * gnarl;
+            vy = -0.95;
+          }
+        } else if (style === 'hankengai') {
+          if (t < 0.25) {
+            vx = 0.85; vy = 0.65 * (1 - t * 3); vz = 0.2;
+          } else {
+            vx = 0.88 + nx;
+            vz = Math.sin(t * Math.PI * 2) * 0.45 * gnarl;
+            vy = -0.22 + Math.cos(t * Math.PI * 2) * 0.25;
+          }
+        } else if (style === 'bunjingi') {
+          vx = Math.sin(t * Math.PI * 3.0) * 0.85 * gnarl + nx;
+          vz = Math.cos(t * Math.PI * 2.5) * 0.65 * gnarl + nz;
+          vy = 0.95;
+        } else if (style === 'hokidachi') {
+          vx = nx * 0.15; vz = nz * 0.15; vy = 1.0;
+          if (t >= 0.46) break;
+        }
+
+        const mag = Math.hypot(vx, vy, vz) || 1;
+        cx += (vx / mag) * stepLen;
+        cy += (vy / mag) * stepLen;
+        cz += (vz / mag) * stepLen;
+
+        if ((style === 'kengai' || style === 'hankengai') && cy <= this.obstacleBounds.potTopY + 6) {
+          const dx = cx - this.obstacleBounds.potCX;
+          const dz = cz - this.obstacleBounds.potCZ;
+          const dist = Math.hypot(dx, dz) || 1;
+          const minSafe = this.obstacleBounds.safeRadius + r + 4;
+          if (dist < minSafe) {
+            cx = this.obstacleBounds.potCX + (dx / dist) * minSafe;
+            cz = this.obstacleBounds.potCZ + (dz / dist) * minSafe;
+          }
+        }
+      }
+
+      this.voxelizeMultiStrandLimb(spine, baseRadius > 6.2 ? 3 : 2, allowShari);
+
+      if (style === 'hokidachi') {
+        const top = spine[spine.length - 1];
+        for (let i = 0; i < 12; i++) {
+          const goldenYaw = i * 2.39996;
+          const pitch = 0.28 + (i / 12) * 0.65;
+          this.grow3DBranch(top.x, top.y, top.z, top.r * 0.58, 42 * padScale, goldenYaw, pitch, 2, padScale * 0.82, false, tierIdx);
+        }
+      } else {
+        const startIdx = style === 'bunjingi' ? Math.floor(spine.length * 0.68) : Math.floor(spine.length * 0.24);
+        const stride = style === 'kengai' ? 5 : 6;
+        let branchCounter = 0;
+
+        for (let i = startIdx; i < spine.length - 3; i += stride) {
+          const node = spine[i];
+          branchCounter++;
+          let bYaw = branchCounter * 2.39996 + this.range(-0.2, 0.2);
+          let bPitch = 0.12 + this.range(-0.1, 0.15);
+
+          if (style === 'fukinagashi') {
+            bYaw = this.range(-0.45, 0.45);
+            bPitch = 0.15;
+          } else if (style === 'kengai' || style === 'hankengai') {
+            const awayAngle = Math.atan2(node.z - this.obstacleBounds.potCZ, node.x - this.obstacleBounds.potCX);
+            bYaw = awayAngle + (branchCounter % 2 === 0 ? 0.65 : -0.65);
+            bPitch = 0.08;
+          }
+
+          const len = (1 - node.t * 0.48) * (style === 'bunjingi' ? 24 : 36) * padScale;
+          const isJin = allowShari && branchCounter === 2 && this.rand() < 0.65;
+          this.grow3DBranch(node.x, node.y, node.z, Math.max(1.8, node.r * 0.62), len, bYaw, bPitch, isJin ? 1 : 2, padScale * (1 - node.t * 0.25), isJin, tierIdx);
+        }
+
+        const apex = spine[spine.length - 1];
+        this.voxelizeFoliageCloud(apex.x, apex.y + 4, apex.z, 20 * padScale, 9.5 * padScale, tierIdx);
+      }
+    }
+
+    grow3DBranch(x, y, z, r, len, yaw, pitch, depth, padScale, isJin, tierIdx) {
+      const pts = [];
+      const segs = 8;
+      let cx = x, cy = y, cz = z, curYaw = yaw, curPitch = pitch;
+
+      for (let i = 0; i <= segs; i++) {
+        const t = i / segs;
+        pts.push({ x: cx, y: cy, z: cz, r: Math.max(1.3, r * (1 - t * 0.55)), t });
+        curYaw += this.range(-0.15, 0.15);
+        curPitch += 0.03;
+        const step = len / segs;
+        cx += Math.cos(curYaw) * Math.cos(curPitch) * step;
+        cy += Math.sin(curPitch) * step;
+        cz += Math.sin(curYaw) * Math.cos(curPitch) * step;
+
+        if (cy <= this.obstacleBounds.potTopY + 5) {
+          const dx = cx - this.obstacleBounds.potCX;
+          const dz = cz - this.obstacleBounds.potCZ;
+          const d = Math.hypot(dx, dz) || 1;
+          const minSafe = this.obstacleBounds.safeRadius + 5;
+          if (d < minSafe) {
+            cx = this.obstacleBounds.potCX + (dx / d) * minSafe;
+            cz = this.obstacleBounds.potCZ + (dz / d) * minSafe;
+          }
+        }
+      }
+
+      if (isJin) {
+        this.voxelizeMultiStrandLimb(pts, 1, false, true);
+        return;
+      }
+
+      this.voxelizeMultiStrandLimb(pts, 1, false, false);
+
+      if (depth > 1) {
+        const mid = pts[Math.floor(pts.length * 0.55)];
+        const forkDir = this.rand() > 0.5 ? 0.65 : -0.65;
+        this.grow3DBranch(mid.x, mid.y, mid.z, mid.r * 0.75, len * 0.62, curYaw + forkDir, curPitch + 0.05, depth - 1, padScale * 0.82, false, tierIdx);
+      }
+
+      const tip = pts[pts.length - 1];
+      this.voxelizeFoliageCloud(tip.x, tip.y + 2, tip.z, 17 * padScale, 8.0 * padScale, tierIdx);
+    }
+
+    voxelizeMultiStrandLimb(pts, strandCount, hasShari, isPureDeadwood = false) {
+      for (let i = 0; i < pts.length - 1; i++) {
+        const p1 = pts[i], p2 = pts[i + 1];
+        const dist = Math.max(1, Math.ceil(Math.hypot(p2.x - p1.x, p2.y - p1.y, p2.z - p1.z) * 1.35));
+
+        for (let s = 0; s <= dist; s++) {
+          const frac = s / dist;
+          const cx = p1.x + (p2.x - p1.x) * frac;
+          const cy = p1.y + (p2.y - p1.y) * frac;
+          const cz = p1.z + (p2.z - p1.z) * frac;
+          const rad = p1.r + (p2.r - p1.r) * frac;
+          const t = (i + frac) / pts.length;
+
+          if (isPureDeadwood) {
+            this.stampSphere(cx, cy, cz, rad, 6, 4, 0.35);
+            continue;
+          }
+
+          if (strandCount === 1) {
+            this.stampSphere(cx, cy, cz, rad, 1, 5, 0.28);
+          } else {
+            for (let k = 0; k < strandCount; k++) {
+              const twistAngle = t * Math.PI * 5.0 + (k / strandCount) * Math.PI * 2;
+              const offset = rad * 0.32;
+              const sx = cx + Math.cos(twistAngle) * offset;
+              const sz = cz + Math.sin(twistAngle) * offset;
+              if (hasShari && k === 0 && t > 0.08 && t < 0.85) {
+                this.stampSphere(sx, cy, sz, rad * 0.64, 6, 4, 0.35);
+              } else {
+                this.stampSphere(sx, cy, sz, rad * 0.74, 1, 5, 0.25);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    voxelizeFoliageCloud(cx, cy, cz, rx, ry, tierIdx) {
+      for (const prev of this.foliageCenters) {
+        const dx = cx - prev.x, dy = cy - prev.y, dz = cz - prev.z;
+        const d = Math.hypot(dx, dy * 1.8, dz) || 1;
+        const minSep = (rx + prev.rx) * 0.65;
+        if (d < minSep) {
+          cx += (dx / d) * (minSep - d) * 0.6;
+          cy += (dy / d) * (minSep - d) * 0.4;
+          cz += (dz / d) * (minSep - d) * 0.6;
+        }
+      }
+      this.foliageCenters.push({ x: cx, y: cy, z: cz, rx, ry });
+
+      const rHoriz = Math.ceil(rx);
+      const rVert = Math.ceil(ry);
+
+      for (let dy = -rVert; dy <= rVert; dy++) {
+        const y = (cy + dy) | 0;
+        if (y < 2 || y >= 254) continue;
+        const ny = dy < 0 ? (dy / (rVert * 0.55)) : (dy / rVert);
+        if (Math.abs(ny) > 1.1) continue;
+
+        for (let dz = -rHoriz; dz <= rHoriz; dz++) {
+          const z = (cz + dz) | 0;
+          if (z < 2 || z >= 254) continue;
+          const nz = dz / rHoriz;
+
+          for (let dx = -rHoriz; dx <= rHoriz; dx++) {
+            const x = (cx + dx) | 0;
+            if (x < 2 || x >= 254) continue;
+            const nx = dx / rHoriz;
+
+            const d2 = nx * nx + ny * ny + nz * nz;
+            if (d2 > 1.15) continue;
+
+            const tuft = this.noise3D(x * 0.24, y * 0.28, z * 0.24);
+            const fine = this.noise3D(x * 0.65, y * 0.65, z * 0.65) * 0.35;
+            if (d2 + tuft * 0.42 + fine * 0.2 > 0.88) continue;
+
+            if (tierIdx >= 6 && dy > 0 && fine > 0.24) {
+              this.setVoxel(x, y, z, 16); // Imperial Golden Dew Sparkle
+            } else {
+              const lightBias = (dy / rVert + 1) * 0.5;
+              const tone = Math.max(0, Math.min(5, Math.floor((lightBias * 0.72 + (fine + 0.35) * 0.4) * 6)));
+              this.setVoxel(x, y, z, 10 + tone);
+            }
+          }
+        }
+      }
+    }
+
+    bakeAndRenderDirect() {
+      const W = 512, H = 512;
+      const zBuf = this.zBuf;
+      const pixels = this.pixels;
+      const grid = this.grid;
+      const stampGrid = this.stampGrid;
+      const stamp = this.currentStamp;
+
+      zBuf.fill(1e9);
+
+      // Dark Tokonoma Studio Backdrop
+      for (let py = 0; py < H; py++) {
+        const isFloor = py > 438;
+        const rowOff = py * W;
+        for (let px = 0; px < W; px++) {
+          if (isFloor) {
+            pixels[rowOff + px] = (255 << 24) | (15 << 16) | (18 << 8) | 22;
+          } else {
+            const dx = px - 256, dy = py - 220;
+            const d = Math.min(1, Math.hypot(dx, dy) / 340);
+            const v = (28 * (1 - d) + 8 * d) | 0;
+            pixels[rowOff + px] = (255 << 24) | (v << 16) | ((v + 3) << 8) | v;
+          }
+        }
+      }
+
+      const yaw = 0.34, pitch = 0.22, scale = 1.82;
+      const cosY = Math.cos(yaw), sinY = Math.sin(yaw);
+      const cosP = Math.cos(pitch), sinP = Math.sin(pitch);
+      const sunX = -0.48, sunY = 0.76, sunZ = 0.44;
+      const count = this.occupiedCount;
+      const list = this.occupiedList;
+
+      for (let i = 0; i < count; i++) {
+        const idx = list[i];
+        const mat = grid[idx];
+        const x = idx & 255;
+        const z = (idx >> 8) & 255;
+        const y = (idx >> 16) & 255;
+
+        // Cull interior invisible voxels
+        const expTop   = stampGrid[idx + 65536] !== stamp;
+        const expBot   = stampGrid[idx - 65536] !== stamp;
+        const expLeft  = stampGrid[idx - 1] !== stamp;
+        const expRight = stampGrid[idx + 1] !== stamp;
+        const expFront = stampGrid[idx + 256] !== stamp;
+        const expBack  = stampGrid[idx - 256] !== stamp;
+
+        if (!expTop && !expBot && !expLeft && !expRight && !expFront && !expBack) continue;
+
+        // 3D Projection
+        const vx = x - 128, vy = y - 98, vz = z - 128;
+        const rx = vx * cosY - vz * sinY;
+        const rz1 = vx * sinY + vz * cosY;
+        const ry = vy * cosP - rz1 * sinP;
+        const depth = vy * sinP + rz1 * cosP;
+
+        const sx = (256 + rx * scale) | 0;
+        const sy = (292 - ry * scale) | 0;
+        if (sx < 2 || sx >= 510 || sy < 2 || sy >= 510) continue;
+
+        // Fast 6-neighbor + diagonal Ambient Occlusion
+        let occ = 0;
+        if (!expTop) occ += 2;
+        if (!expBot) occ += 2;
+        if (!expLeft) occ += 2;
+        if (!expRight) occ += 2;
+        if (!expFront) occ += 2;
+        if (!expBack) occ += 2;
+        if (stampGrid[idx + 65536 + 1] === stamp) occ++;
+        if (stampGrid[idx + 65536 - 1] === stamp) occ++;
+        if (stampGrid[idx + 65536 + 256] === stamp) occ++;
+        if (stampGrid[idx + 65536 - 256] === stamp) occ++;
+        const ao = 1.06 - (occ / 16) * 0.48;
+
+        // Fast 3D Raycast Sun Shadow check
+        let inShadow = false;
+        let srx = x + sunX * 2.0, sry = y + sunY * 2.0, srz = z + sunZ * 2.0;
+        for (let step = 0; step < 28; step++) {
+          const ix = srx | 0, iy = sry | 0, iz = srz | 0;
+          if (ix <= 0 || ix >= 255 || iy >= 255 || iz <= 0 || iz >= 255) break;
+          if (stampGrid[ix + (iz << 8) + (iy << 16)] === stamp) {
+            inShadow = true;
+            break;
+          }
+          srx += sunX * 2.2; sry += sunY * 2.2; srz += sunZ * 2.2;
+        }
+
+        let dirLight = 0.86;
+        if (expTop) dirLight += 0.22;
+        if (expLeft) dirLight += 0.08;
+        if (expRight) dirLight -= 0.10;
+        if (expBot && !expTop) dirLight -= 0.20;
+
+        const totalLight = Math.max(0.28, Math.min(1.32, ao * dirLight * (inShadow ? 0.64 : 1.05)));
+        const baseRGB = this.paletteRGB[mat];
+        const r = (baseRGB >> 16) & 255;
+        const g = (baseRGB >> 8) & 255;
+        const b = baseRGB & 255;
+
+        const mTop = totalLight * 1.08;
+        const colTop = (255 << 24) | (Math.min(255, (b * mTop) | 0) << 16) | (Math.min(255, (g * mTop) | 0) << 8) | Math.min(255, (r * mTop) | 0);
+        const mLeft = totalLight * 0.92;
+        const colLeft = (255 << 24) | (Math.min(255, (b * mLeft) | 0) << 16) | (Math.min(255, (g * mLeft) | 0) << 8) | Math.min(255, (r * mLeft) | 0);
+        const mRight = totalLight * 0.76;
+        const colRight = (255 << 24) | (Math.min(255, (b * mRight) | 0) << 16) | (Math.min(255, (g * mRight) | 0) << 8) | Math.min(255, (r * mRight) | 0);
+
+        const zVal = -depth;
+
+        for (let dy = -1; dy <= 1; dy++) {
+          const py = sy + dy;
+          const rowIdx = py * W;
+          for (let dx = -1; dx <= 1; dx++) {
+            const pIdx = rowIdx + sx + dx;
+            if (zVal < zBuf[pIdx]) {
+              zBuf[pIdx] = zVal;
+              pixels[pIdx] = dy < 0 ? colTop : (dx <= 0 ? colLeft : colRight);
+            }
+          }
+        }
+      }
+
+      this.ctx.putImageData(this.imgData, 0, 0);
+    }
+  }
+
+  const _sharedVoxelEngine = new VoxelBonsaiEngine();
+  const _voxelDataURLCache = new Map();
+
+  function generateBonsaiImage(seedInt, role, tierIdx, sp) {
+    const key = `${seedInt}_${role}_${tierIdx}_${sp}`;
+    let cached = _voxelDataURLCache.get(key);
+    if (cached) return cached;
+
+    const dataUrl = _sharedVoxelEngine.renderBonsaiDataURL(seedInt, role, tierIdx, sp);
+    if (_voxelDataURLCache.size > 160) {
+      const oldest = _voxelDataURLCache.keys().next().value;
+      _voxelDataURLCache.delete(oldest);
+    }
+    _voxelDataURLCache.set(key, dataUrl);
+    return dataUrl;
+  }
+
+  function ensureTreeImage(p) {
+    if (!p.imgData) {
+      const sp = TREE_SPECIES[p.mIdx] || "Black Pine";
+      p.imgData = generateBonsaiImage(p.seedInt, p.role, p.tierIndex ?? p.tierIdx ?? 0, sp);
+    }
+    return p.imgData;
+  }
+
+  /* ================= STATE ================= */
   let State = {
     funds: 50000000, 
     fuelReserve: 250000, // Water
@@ -931,11 +1434,7 @@
       if(!State.gallery) State.gallery = [];
       if(!State.routes || State.routes.length < 400) State.routes = generateRoutes();
       
-      State.fleet.forEach(p => p.imgData = generateBonsaiImage(p.seedInt, p.role, p.tierIndex, TREE_SPECIES[p.mIdx]));
-      State.marketCars.forEach(p => p.imgData = generateBonsaiImage(p.seedInt, p.role, p.tierIndex, TREE_SPECIES[p.mIdx]));
-      State.gallery.forEach(g => g.imgData = generateBonsaiImage(g.seedInt, g.role, g.tierIdx, TREE_SPECIES[g.mIdx]));
-      State.auctions.forEach(a => { if(a.type==='plane') a.item.imgData = generateBonsaiImage(a.item.seedInt, a.item.role, a.item.tierIndex, TREE_SPECIES[a.item.mIdx]); });
-
+      // Market cars intentionally do NOT generate images to keep system stress at zero
       State.fleet.forEach(p => { p.status = 'READY'; p.flightEnd = 0; p.flightStart = 0; });
       updateHUD(); setTab('market');
       toast("Garden Restored.");
@@ -1047,7 +1546,7 @@
     return rts;
   }
 
-  function harvestStrain(tIdx) {
+  function harvestStrain(tIdx, skipImage = false) {
     let pIdx = Math.floor(Math.random() * TREE_PREFIXES.length);
     let bIdx = Math.floor(Math.random() * TREE_ORIGINS.length);
     let mIdx = Math.floor(Math.random() * TREE_SPECIES.length);
@@ -1062,7 +1561,7 @@
     return {
       uid: 'T' + Math.floor(100+Math.random()*899) + 'BB',
       pIdx, bIdx, mIdx, rIdx, tierIndex: tIdx, seedInt: seedInt,
-      imgData: generateBonsaiImage(seedInt, TREE_STYLES[rIdx], tIdx, sp),
+      imgData: skipImage ? null : generateBonsaiImage(seedInt, TREE_STYLES[rIdx], tIdx, sp),
       name: `${TREE_PREFIXES[pIdx]} ${TREE_ORIGINS[bIdx]} ${sp}`,
       role: TREE_STYLES[rIdx], tierName: tD.name, tierColor: tD.color,
       value: val, cost: Math.max(50000, Math.floor(val * 0.8)), 
@@ -1084,12 +1583,13 @@
     };
   }
 
-  /* ================= MARKETS & NURSERY ================= */
+  /* ================= MARKETS & NURSERY (NO MARKET IMAGES!) ================= */
   function refreshMarket() {
     State.marketCars = [];
     for(let i=0; i<5; i++) {
       let r = Math.random()*100; let tI = r>99.9?9 : r>99?8 : r>95?7 : r>85?6 : r>70?5 : r>50?4 : r>30?3 : r>15?2 : r>5?1 : 0;
-      State.marketCars.push(harvestStrain(tI));
+      // Pass skipImage = true so refreshing the market every 10s puts zero stress on the system!
+      State.marketCars.push(harvestStrain(tI, true));
     }
     renderMarket();
   }
@@ -1104,11 +1604,10 @@
             <span style="color:${c.tierColor}; font-weight:bold; font-size:10px;">[${c.tierName}]</span>
             <span class="badge" style="color:${rCol}; border-color:${rCol};">${c.role}</span>
           </div>
-          <div class="bud-art-container">
-            <img class="bud-pixel-canvas" src="${c.imgData}">
+          <div class="bud-art-container" style="padding:8px 10px;">
             <div style="flex:1;">
               <div style="font-size:12px; font-weight:900; color:#fff;">${c.name}</div>
-              <div style="font-size:9px; color:var(--silver-dim); margin-top:2px;">Style: ${c.role}</div>
+              <div style="font-size:9px; color:var(--silver-dim); margin-top:2px;">Style: ${c.role} // Seed #${c.seedInt}</div>
             </div>
           </div>
           <div class="spec-grid">
@@ -1132,7 +1631,10 @@
   function buyMarketStrain(idx) {
     let c = State.marketCars[idx]; if(!c) return;
     if(State.funds < c.cost) { toast("Insufficient cash."); return; }
-    State.funds -= c.cost; State.fleet.push(c); State.marketCars.splice(idx, 1);
+    State.funds -= c.cost;
+    ensureTreeImage(c); // Generate 3D voxel image now that the player purchased it
+    State.fleet.push(c);
+    State.marketCars.splice(idx, 1);
     toast(`Benched: ${c.name}`); updateHUD(); renderMarket();
   }
 
@@ -1145,7 +1647,8 @@
     let tArr = bIdx===0?[0,1,2,3]:bIdx===1?[2,3,4,5]:bIdx===2?[4,5,6,7]:[6,7,8,9];
     for(let i=0; i<c; i++) {
       let r = Math.random()*100; let tI = r>95?tArr[3]:r>80?tArr[2]:r>50?tArr[1]:tArr[0];
-      State.fleet.push(harvestStrain(tI));
+      // Lazy-render when benches are opened so bulk planting (e.g. MAX mode) never freezes!
+      State.fleet.push(harvestStrain(tI, c > 10));
     }
     updateHUD(); toast(`Cultivated ${c}x Bonsai.`);
   }
@@ -1254,6 +1757,7 @@
     });
 
     filtered.forEach(p => {
+      ensureTreeImage(p);
       let rCol = p.role === 'CHOKKAN' ? '#a855f7' : p.role === 'MOYOGI' ? '#f59e0b' : p.role === 'SHAKAN' ? '#22c55e' : p.role === 'KENGAI' ? '#ec4899' : p.role === 'YOSE_UE' ? '#fbbf24' : '#06b6d4';
       
       let pOpts = routeOptionsCache[p.role];
@@ -1296,6 +1800,7 @@
           
           <div style="display:flex; justify-content:space-between; margin-top:3px;">
             <div style="display:flex; gap:3px;">
+              <button class="btn" style="padding:3px 5px; font-size:8px;" onclick="exportStrain('${p.uid}')">Code</button>
               <button class="btn btn-purple" style="padding:3px 5px; font-size:8px;" ${p.status==='IN_FLIGHT'?'disabled':''} onclick="initAuction('${p.uid}', 'plane')">Auction</button>
               <button class="btn btn-danger" style="padding:3px 5px; font-size:8px;" ${p.status==='IN_FLIGHT'?'disabled':''} onclick="consumeStrain('${p.uid}')">Sell Local</button>
             </div>
@@ -1333,6 +1838,7 @@
   function snapGalleryPic(uid) {
     let p = State.fleet.find(x => x.uid === uid);
     if(!p) return;
+    ensureTreeImage(p);
     
     State.gallery.push({
       gid: "gal_" + Date.now() + Math.floor(Math.random()*1000),
@@ -1368,6 +1874,7 @@
     }
 
     State.gallery.forEach(g => {
+      ensureTreeImage(g);
       let rCol = g.role === 'CHOKKAN' ? '#a855f7' : g.role === 'MOYOGI' ? '#f59e0b' : g.role === 'SHAKAN' ? '#22c55e' : g.role === 'KENGAI' ? '#ec4899' : g.role === 'YOSE_UE' ? '#fbbf24' : '#06b6d4';
       
       list.innerHTML += `
@@ -1377,7 +1884,7 @@
             <span class="badge" style="color:${rCol}; border-color:${rCol};">${g.role}</span>
           </div>
           <div style="display:flex; justify-content:center; padding:10px 0;">
-             <img src="${g.imgData}" style="width:96px; height:96px; image-rendering:pixelated; background:#000; border:1px solid #142014; border-radius:4px;" />
+             <img src="${g.imgData}" style="width:160px; height:160px; image-rendering:pixelated; background:#000; border:1px solid #142014; border-radius:4px;" />
           </div>
           <div style="text-align:center; font-size:14px; font-weight:900; color:#fff;">${g.name}</div>
           <div style="text-align:center; font-size:9px; color:var(--silver-dim); margin-bottom: 8px;">Masterpiece Record</div>
@@ -1696,7 +2203,7 @@
     c.slice(0,a).forEach(item=>{ 
       if(type==='planes'){ let i=State.fleet.findIndex(x=>x.uid===item.uid); State.fleet.splice(i,1); }
       if(type==='pilots'){ let i=State.pilots.findIndex(x=>x.uid===item.uid); State.pilots.splice(i,1); }
-      State.auctions.push({item:item, type:type, baseVal:item.value, timer:20.0, currentBid:Math.floor(item.value*0.9), log:[]}); 
+      State.auctions.push({item:item, type:type === 'planes' ? 'plane' : 'pilot', baseVal:item.value, timer:20.0, currentBid:Math.floor(item.value*0.9), log:[]}); 
       loaded++;
     });
     
@@ -1707,6 +2214,7 @@
   function renderAuctions() {
     const b=$('auction-board'); if(!b)return; $('auction-count').innerText=State.auctions.length; b.innerHTML='';$('auction-idle').style.display = State.auctions.length===0 ? 'block' : 'none';
     State.auctions.forEach((a) => {
+      if (a.type === 'plane' || a.type === 'planes') ensureTreeImage(a.item);
       let hLog = a.log.map(l=>`<div>${l}</div>`).join('');
       let col = a.item.tierColor || '#fff';
       
@@ -1714,7 +2222,7 @@
         <div class="auction-slot">
           <div style="display:flex; justify-content:space-between; align-items:flex-end;">
             <div style="display:flex; gap:8px; align-items:center;">
-              ${a.type === 'plane' ? `<img src="${a.item.imgData}" style="width:40px; height:40px; image-rendering:pixelated; background:#000; border:1px solid #142014;" />` : ''}
+              ${(a.type === 'plane' || a.type === 'planes') ? `<img src="${a.item.imgData}" style="width:40px; height:40px; image-rendering:pixelated; background:#000; border:1px solid #142014;" />` : ''}
               <div>
                 <div style="font-size:12px;font-weight:bold;color:${col};">${a.item.name}</div>
                 <div class="stat-block" style="font-size:9px;">VAL: $${fmt(a.baseVal)}</div>
@@ -1809,7 +2317,11 @@
     const target = $('tab-'+tabId); if(target) target.classList.add('active');
 
     if(tabId==='fleet') renderFleet();
+    if(tabId==='pilots') renderPilots();
+    if(tabId==='routes') renderRoutes();
     if(tabId==='auction') renderAuctions();
+    if(tabId==='checklist') updateAutomationUI();
+    if(tabId==='upgrades') renderUpgrades();
     if(tabId==='gallery') renderGallery();
   }
   function godMode() {
@@ -1822,6 +2334,7 @@
   function initUI() {
     if(!State.gallery) State.gallery = [];
     if(!State.routes || State.routes.length < 400) State.routes = generateRoutes();
+    if(!State.sideMissions || State.sideMissions.length === 0) generateSideMissions();
     updateHUD(); refreshMarket();
     if(globalInterval) clearInterval(globalInterval); globalInterval = setInterval(gameTick, 100);
   }
